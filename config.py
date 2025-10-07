@@ -1,7 +1,7 @@
 import os
 
 # Токен бота от @BotFather
-BOT_TOKEN = '8275499694:AAF0cb5GwwsAMPFSQp3eF_b24CC1rCVRO9Q'
+BOT_TOKEN = '8397915998:AAH-8wLLqP8JX-rapaDnyBs0nrOj2FPmaAQ'
 
 # ID администратора (получи через @userinfobot)
 ADMIN_ID = 7436941173  # Замени на свой ID
