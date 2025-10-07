@@ -25,6 +25,11 @@ dp = Dispatcher()
 # Регистрация роутера
 dp.include_router(router)
 
+# ✅ ДОБАВЛЕН ОБРАБОТЧИК КОРНЕВОГО ПУТИ
+async def health_check(request):
+    """Health check endpoint"""
+    return web.json_response({'status': 'ok', 'bot': 'running'})
+
 # WebApp API эндпоинты
 async def get_content(request):
     """API для получения контента в WebApp"""
@@ -135,6 +140,8 @@ async def start_webhook_server():
     app = web.Application(middlewares=[cors_middleware])
     
     # Роуты
+    app.router.add_get('/', health_check)  # ✅ ДОБАВЛЕН
+    app.router.add_head('/', health_check)  # ✅ ДОБАВЛЕН для health checks
     app.router.add_get('/api/content', get_content)
     app.router.add_get('/api/purchases', get_purchases)
     app.router.add_post('/api/create_invoice', create_invoice)
@@ -145,6 +152,7 @@ async def start_webhook_server():
     await site.start()
     logger.info("✅ API server started on http://0.0.0.0:8080")
     logger.info("📡 Endpoints:")
+    logger.info("   GET  /")
     logger.info("   GET  /api/content")
     logger.info("   GET  /api/purchases")
     logger.info("   POST /api/create_invoice")
