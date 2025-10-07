@@ -3,9 +3,10 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, Update
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 from aiohttp import web
-import json
+import os
 
 import database as db
 from handlers import router
@@ -25,10 +26,21 @@ dp = Dispatcher()
 # Регистрация роутера
 dp.include_router(router)
 
-# ✅ ДОБАВЛЕН ОБРАБОТЧИК КОРНЕВОГО ПУТИ
+# Webhook configuration
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+# Получаем URL из переменной окружения или используем заглушку
+BASE_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://your-app.onrender.com')
+WEBHOOK_URL = BASE_URL + WEBHOOK_PATH
+
+# Health check endpoint
 async def health_check(request):
-    """Health check endpoint"""
-    return web.json_response({'status': 'ok', 'bot': 'running'})
+    """Health check для Render"""
+    return web.json_response({
+        'status': 'ok', 
+        'bot': 'running',
+        'webhook': WEBHOOK_URL,
+        'bot_id': (await bot.get_me()).id
+    })
 
 # WebApp API эндпоинты
 async def get_content(request):
@@ -39,7 +51,6 @@ async def get_content(request):
         
         content_list = db.get_approved_content(content_type)
         
-        # Добавляем информацию о покупках если передан user_id
         if user_id:
             try:
                 uid = int(user_id)
@@ -82,22 +93,18 @@ async def create_invoice(request):
         if not content:
             return web.json_response({'error': 'Content not found'}, status=404)
         
-        # Проверяем, не куплен ли уже контент
         if db.is_purchased(user_id, content_id):
             return web.json_response({'error': 'Already purchased'}, status=400)
         
         if content['price'] == 0:
-            # Бесплатный контент - сразу добавляем в покупки
             db.add_purchase(user_id, content_id)
             return web.json_response({'success': True, 'free': True})
         
-        # ТЕСТОВЫЙ РЕЖИМ - автоматически добавляем покупку без оплаты
         if not USE_REAL_PAYMENTS:
             logger.info(f"TEST MODE: Auto-purchasing content {content_id} for user {user_id}")
             db.add_purchase(user_id, content_id)
             return web.json_response({'success': True, 'test_mode': True})
         
-        # Создаём инвойс для платной покупки (только если включены реальные платежи)
         from aiogram.types import LabeledPrice
         
         prices = [LabeledPrice(label=f"Контент #{content_id}", amount=content['price'])]
@@ -107,7 +114,7 @@ async def create_invoice(request):
             description=f"Оплата {content['type']}",
             payload=str(content_id),
             provider_token=PAYMENT_PROVIDER_TOKEN,
-            currency='XTR',  # Telegram Stars
+            currency='XTR',
             prices=prices
         )
         
@@ -117,7 +124,7 @@ async def create_invoice(request):
         logger.error(f"Error creating invoice: {e}")
         return web.json_response({'error': str(e)}, status=500)
 
-# CORS middleware для работы с GitHub Pages
+# CORS middleware
 @web.middleware
 async def cors_middleware(request, handler):
     """Middleware для CORS"""
@@ -135,28 +142,6 @@ async def cors_middleware(request, handler):
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
     return response
 
-async def start_webhook_server():
-    """Запуск веб-сервера для API"""
-    app = web.Application(middlewares=[cors_middleware])
-    
-    # Роуты
-    app.router.add_get('/', health_check)  # ✅ ДОБАВЛЕН
-    app.router.add_head('/', health_check)  # ✅ ДОБАВЛЕН для health checks
-    app.router.add_get('/api/content', get_content)
-    app.router.add_get('/api/purchases', get_purchases)
-    app.router.add_post('/api/create_invoice', create_invoice)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
-    await site.start()
-    logger.info("✅ API server started on http://0.0.0.0:8080")
-    logger.info("📡 Endpoints:")
-    logger.info("   GET  /")
-    logger.info("   GET  /api/content")
-    logger.info("   GET  /api/purchases")
-    logger.info("   POST /api/create_invoice")
-
 async def set_bot_commands():
     """Установка команд бота"""
     commands = [
@@ -168,7 +153,7 @@ async def set_bot_commands():
     await bot.set_my_commands(commands)
     logger.info("✅ Bot commands set")
 
-async def on_startup():
+async def on_startup(app):
     """Действия при запуске"""
     # Инициализация базы данных
     db.init_db()
@@ -177,8 +162,25 @@ async def on_startup():
     # Установка команд
     await set_bot_commands()
     
-    # Запуск API сервера
-    asyncio.create_task(start_webhook_server())
+    # Получаем информацию о боте
+    bot_info = await bot.get_me()
+    logger.info(f"🤖 Bot: @{bot_info.username} (ID: {bot_info.id})")
+    
+    # Удаляем старый webhook
+    await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("🗑️ Old webhook deleted")
+    
+    # Устанавливаем новый webhook
+    webhook_info = await bot.get_webhook_info()
+    if webhook_info.url != WEBHOOK_URL:
+        await bot.set_webhook(
+            url=WEBHOOK_URL,
+            allowed_updates=dp.resolve_used_update_types(),
+            drop_pending_updates=True
+        )
+        logger.info(f"✅ Webhook set to: {WEBHOOK_URL}")
+    else:
+        logger.info(f"ℹ️ Webhook already set to: {WEBHOOK_URL}")
     
     # Показываем режим работы
     if USE_REAL_PAYMENTS:
@@ -186,27 +188,53 @@ async def on_startup():
     else:
         logger.info("🧪 Payment mode: TEST MODE (auto-purchase, no real payments)")
     
-    logger.info("🤖 Bot started successfully!")
+    logger.info("🚀 Bot started successfully with WEBHOOK!")
     logger.info("=" * 50)
 
-async def on_shutdown():
+async def on_shutdown(app):
     """Действия при остановке"""
     logger.info("⏹️ Shutting down bot...")
+    await bot.delete_webhook(drop_pending_updates=True)
     await bot.session.close()
 
-async def main():
+def main():
     """Главная функция"""
-    try:
-        await on_startup()
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-    except Exception as e:
-        logger.error(f"Critical error: {e}")
-    finally:
-        await on_shutdown()
+    # Создаём приложение
+    app = web.Application(middlewares=[cors_middleware])
+    
+    # API роуты (важен порядок - сначала конкретные, потом общие)
+    app.router.add_get('/api/content', get_content)
+    app.router.add_get('/api/purchases', get_purchases)
+    app.router.add_post('/api/create_invoice', create_invoice)
+    app.router.add_get('/', health_check)
+    
+    # Настройка webhook handler
+    webhook_requests_handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+    )
+    webhook_requests_handler.register(app, path=WEBHOOK_PATH)
+    
+    # Startup/shutdown handlers
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    
+    # Логируем информацию
+    logger.info("🚀 Starting web server on 0.0.0.0:8080")
+    logger.info(f"📡 Webhook path: {WEBHOOK_PATH}")
+    logger.info(f"📡 Full webhook URL: {WEBHOOK_URL}")
+    logger.info("📡 API Endpoints:")
+    logger.info("   GET  /")
+    logger.info("   GET  /api/content")
+    logger.info("   GET  /api/purchases")
+    logger.info("   POST /api/create_invoice")
+    
+    # Запуск сервера
+    web.run_app(app, host='0.0.0.0', port=8080)
 
 if __name__ == '__main__':
     try:
-        asyncio.run(main())
+        main()
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception as e:
